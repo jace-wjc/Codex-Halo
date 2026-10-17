@@ -102,8 +102,8 @@ export async function refreshSnapshots(): Promise<ProviderSnapshot[]> {
   return fetchSnapshots(true);
 }
 
-export async function getUsageStats(): Promise<UsageStats> {
-  return invokeDesktop<UsageStats>("get_usage_stats");
+export async function getUsageStats(force = false): Promise<UsageStats> {
+  return invokeDesktop<UsageStats>("get_usage_stats", { force });
 }
 
 export async function getPreferences(): Promise<WidgetPreferences> {

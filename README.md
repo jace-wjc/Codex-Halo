@@ -14,7 +14,7 @@ Native-feeling desktop quota monitor for the local Codex Desktop login state, wi
 - Refreshes quota every five minutes by default, with presets from 10 seconds to 30 minutes, a validated 10-second-to-24-hour custom interval, or manual-only mode. Reset boundaries can accelerate slower schedules to one minute, while failures use bounded exponential backoff; manual refreshes remain serialized and debounced.
 - Shows reset credit count and available reset-credit expiration times when the quota service provides them.
 - Handles stale data, signed-out sessions, unavailable quota responses, and loading states without fabricating values.
-- Adds an on-demand local usage dashboard with total tokens, peak day, sessions and streaks; the activity heatmap switches between daily, weekly, and cumulative views, while Models provides exact hover values and 7-day, 30-day, and all-time ranges.
+- Usage Stats Overview reads the same official account statistics as Codex (total tokens, peak day, sessions, streaks and daily/weekly/cumulative activity). Models keeps deduplicated local model details with exact hover values and 7-day, 30-day, and all-time ranges.
 
 ## Repository Metadata
 
@@ -32,11 +32,13 @@ codex, quota, tauri, react, rust, desktop-app, windows, macos, productivity
 
 ## How It Works
 
-Codex Halo reads the existing Codex Desktop login state on your machine and queries Codex/ChatGPT quota endpoints with that session. The existing authentication reader, endpoint parser, and privacy boundary remain in the Rust desktop process. Quota values come only from normalized service snapshots; local token counts are displayed separately as usage statistics and are never used to estimate remaining quota. The app does not redeem reset credits or modify account settings.
+Codex Halo reads the existing Codex Desktop login state on your machine and queries Codex/ChatGPT quota and account-statistics endpoints with that session. The existing authentication reader, endpoint parser, and privacy boundary remain in the Rust desktop process. Quota values come only from normalized service snapshots; local token counts are displayed separately as usage statistics and are never used to estimate remaining quota. The app does not redeem reset credits or modify account settings.
 
-Usage statistics are built on demand from the timestamp, model, and cumulative token-counter fields already stored in `CODEX_HOME/sessions` and `CODEX_HOME/archived_sessions`. Conversation text and tool output are ignored. The first read creates a local aggregate index; later refreshes only process appended bytes.
+Overview reads the official account profile usage endpoint and preserves its summary, cutoff date and activity buckets. An unavailable official response is shown explicitly rather than replaced with local totals.
 
-The detail-panel refresh action updates quota and the local usage index together so both sections are current after one click. Configurable background scheduling remains quota-only to avoid repeatedly scanning local session files; usage statistics revalidate when opened after 60 seconds or when the user refreshes manually. Changing the quota interval restarts the timer without issuing an immediate request. Manual-only mode disables periodic network requests after the initial startup read.
+Models is built on demand from metadata and token counters in `CODEX_HOME/sessions` and `CODEX_HOME/archived_sessions`, including `.jsonl.zst` compressed history. Plain/compressed copies share a logical index entry. Forks' leading replayed counters are matched against their actual ancestors without relying on rewritten timestamps; independent and sibling sessions remain separate, and real requests after counter resets are retained. Copies of one session are deduplicated with occurrence counts so repeated legitimate requests are not lost. Local totals can differ from account totals. The versioned cache automatically rebuilds older indexes, verifies previously indexed content before appending, and rebuilds rewritten files; compressed history is decoded inside the application without requiring an external zstd installation. Overview shows the official statistics cutoff date when supplied. Conversation text and tool output are never retained or uploaded.
+
+The detail-panel refresh action updates quota, official statistics and the local usage index together. Configurable background scheduling remains quota-only; statistics revalidate on demand after 60 seconds or when refreshed manually. Statistics requests use their own lock and do not change the quota scheduler. Changing the quota interval restarts the timer without issuing an immediate request. Manual-only mode disables periodic network requests after the initial startup read.
 
 The production web entry never substitutes mock quota. A development-only `?designer` route contains explicit visual fixtures for component work. Real quota reading requires the Tauri desktop app and an existing Codex Desktop login on the same machine.
 
@@ -72,9 +74,9 @@ https://github.com/xhzwjc/Codex-Halo/issues
 Codex Halo is local-first and intentionally narrow:
 
 - Reads the local Codex Desktop login state only to query Codex quota.
-- Sends the existing Codex access token only to ChatGPT quota endpoints.
+- Sends the existing Codex access token only to ChatGPT quota and account-statistics endpoints.
 - Stores widget preferences and a local aggregate usage index in its own app config directory.
-- The usage index contains transcript cursors and date/model/token totals only; it contains no conversation text or tool output.
+- The versioned usage index contains session identifiers, counter fingerprints, timestamps, model totals and the selected source directory; it contains no conversation text or tool output.
 - Does not store Codex tokens, account IDs, prompts, chat history, raw quota responses, or local auth paths.
 - Does not include telemetry, analytics, crash reporting, or third-party tracking.
 - Does not redeem reset credits or modify account settings.

@@ -91,4 +91,21 @@ export interface UsageStats {
   skippedFiles: number;
   models: ModelTokenUsage[];
   daily: DailyTokenUsage[];
+  official?: OfficialUsage | null;
+}
+
+export interface OfficialUsageBucket { date: string; totalTokens: number }
+export interface OfficialUsage {
+  status: "ok" | "unavailable" | "signed_out" | "not_applicable";
+  generatedAt: string;
+  asOf?: string | null;
+  totalTokens: number | null;
+  peakDailyTokens: number | null;
+  sessionCount: number | null;
+  longestRunningTurnSeconds: number | null;
+  currentStreak: number | null;
+  longestStreak: number | null;
+  daily: OfficialUsageBucket[];
+  weekly: OfficialUsageBucket[];
+  cumulative: OfficialUsageBucket[];
 }

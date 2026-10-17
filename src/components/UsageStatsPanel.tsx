@@ -7,6 +7,7 @@ import {
   buildActivityMonthLabels,
   buildHeatmap,
   buildWeeklyActivity,
+  buildOfficialWeeklyActivity,
   fillUsageRange,
   formatModelName,
   formatTokenCount,
@@ -15,7 +16,7 @@ import {
   type ActivityMode,
   type UsageRange,
 } from "../lib/usage";
-import type { DailyTokenUsage, Language, UsageStats } from "../types";
+import type { DailyTokenUsage, Language, OfficialUsage, UsageStats } from "../types";
 
 interface UsageStatsPanelProps {
   stats: UsageStats | null;
@@ -66,20 +67,33 @@ function StatsPlaceholder({
   );
 }
 
-function Overview({ stats, language }: { stats: UsageStats; language: Language }) {
+function Overview({ stats, official, language }: { stats: UsageStats; official?: OfficialUsage; language: Language }) {
   const t = copy[normalizeLanguage(language)];
   const [activityMode, setActivityMode] = useState<ActivityMode>("daily");
   const [activityTooltip, setActivityTooltip] = useState<{ x: number; label: string; week: number } | null>(null);
-  const heatmap = useMemo(() => buildHeatmap(stats.daily), [stats.daily]);
+  const daily = useMemo(() => official ? official.daily.map((day) => ({
+    ...day, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0,
+    reasoningOutputTokens: 0, sessionCount: 0, models: [],
+  })) : stats.daily, [official, stats.daily]);
+  const heatmap = useMemo(() => buildHeatmap(daily), [daily]);
   const weeklyActivity = useMemo(
-    () => buildWeeklyActivity(stats.daily, activityMode === "cumulative" ? "cumulative" : "weekly"),
-    [activityMode, stats.daily],
+    () => official && (activityMode === "cumulative" ? official.cumulative : official.weekly).length > 0
+      ? buildOfficialWeeklyActivity(activityMode === "cumulative" ? official.cumulative : official.weekly, activityMode === "cumulative")
+      : buildWeeklyActivity(daily, activityMode === "cumulative" ? "cumulative" : "weekly"),
+    [activityMode, daily, official],
   );
   const monthLabels = useMemo(() => buildActivityMonthLabels(), []);
-  const peakDay = useMemo(() => stats.daily.reduce<DailyTokenUsage | null>(
+  const peakDay = useMemo(() => daily.reduce<DailyTokenUsage | null>(
     (peak, day) => !peak || day.totalTokens > peak.totalTokens ? day : peak,
     null,
-  ), [stats.daily]);
+  ), [daily]);
+  const count = (value: number | null | undefined, compact = true) => value == null ? "—" : formatTokenCount(value, language, compact);
+  const total = official ? official.totalTokens : stats.totalTokens;
+  const peak = official ? official.peakDailyTokens : peakDay?.totalTokens ?? 0;
+  const sessions = official ? official.sessionCount : stats.sessionCount;
+  const currentStreak = official ? official.currentStreak : stats.currentStreak;
+  const longestStreak = official ? official.longestStreak : stats.longestStreak;
+  const activeDays = official ? daily.filter((day) => day.totalTokens > 0).length : stats.activeDays;
   const activityLabel = activityMode === "daily"
     ? t.activityHeatmapLabel
     : activityMode === "weekly"
@@ -109,16 +123,16 @@ function Overview({ stats, language }: { stats: UsageStats; language: Language }
   return (
     <div className="stats-overview">
       <section className="stats-summary-grid" aria-label={t.statsOverview}>
-        <article><span>{t.totalTokens}</span><strong>{formatTokenCount(stats.totalTokens, language)}</strong><small>{t.allTime}</small></article>
-        <article><span>{t.peakTokens}</span><strong>{formatTokenCount(peakDay?.totalTokens ?? 0, language)}</strong><small>{peakDay ? formatDate(peakDay.date, language) : t.dateUnknown}</small></article>
-        <article><span>{t.sessions}</span><strong>{formatTokenCount(stats.sessionCount, language, false)}</strong><small>{t.recordedSessions}</small></article>
-        <article><span>{t.currentStreak}</span><strong>{stats.currentStreak}<small>{t.dayUnit}</small></strong><small>{t.keepMomentum}</small></article>
-        <article><span>{t.longestStreak}</span><strong>{stats.longestStreak}<small>{t.dayUnit}</small></strong><small>{t.activeDays(stats.activeDays)}</small></article>
+        <article><span>{t.totalTokens}</span><strong>{count(total)}</strong><small>{official ? t.officialAccount : t.allTime}</small></article>
+        <article><span>{t.peakTokens}</span><strong>{count(peak)}</strong><small>{peakDay && peakDay.totalTokens === peak ? formatDate(peakDay.date, language) : t.allTime}</small></article>
+        <article><span>{t.sessions}</span><strong>{count(sessions, false)}</strong><small>{official ? t.officialAccount : t.recordedSessions}</small></article>
+        <article><span>{t.currentStreak}</span><strong>{count(currentStreak, false)}<small>{t.dayUnit}</small></strong><small>{t.keepMomentum}</small></article>
+        <article><span>{t.longestStreak}</span><strong>{count(longestStreak, false)}<small>{t.dayUnit}</small></strong><small>{t.activeDays(activeDays)}</small></article>
       </section>
 
       <section className="activity-card">
         <div className="activity-heading">
-          <div><strong>{t.tokenActivity}</strong><span>{t.activeDays(stats.activeDays)}</span></div>
+          <div><strong>{t.tokenActivity}</strong><span>{t.activeDays(activeDays)}</span></div>
           <div className="activity-modes" aria-label={t.activityAggregation}>
             {(["daily", "weekly", "cumulative"] as const).map((mode) => (
               <button
@@ -171,10 +185,10 @@ function Overview({ stats, language }: { stats: UsageStats; language: Language }
         </div>
       </section>
 
-      <section className="stats-detail-strip">
+      {official ? <p className="stats-scope-note">{official.asOf ? t.officialStatsAsOf(formatDate(official.asOf, language)) : t.officialStatsScope}</p> : <section className="stats-detail-strip">
         <div><Stack /><span>{t.inputTokens}</span><strong>{formatTokenCount(stats.inputTokens, language)}</strong></div>
         <div><ChartLineUp /><span>{t.outputTokens}</span><strong>{formatTokenCount(stats.outputTokens, language)}</strong></div>
-      </section>
+      </section>}
     </div>
   );
 }
@@ -214,6 +228,7 @@ function Models({ stats, language }: { stats: UsageStats; language: Language }) 
 
   return (
     <div className="stats-models">
+      <p className="stats-scope-note">{t.localModelsScope}</p>
       <div className="stats-range" aria-label={t.dateRange}>
         {(["7d", "30d", "all"] as const).map((value) => (
           <button key={value} type="button" aria-pressed={range === value} className={range === value ? "is-active" : ""} onClick={() => { setRange(value); setHoveredIndex(null); }}>
@@ -311,10 +326,12 @@ function Models({ stats, language }: { stats: UsageStats; language: Language }) 
 export const UsageStatsPanel = memo(function UsageStatsPanel({ stats, loading, failed, language }: UsageStatsPanelProps) {
   const t = copy[normalizeLanguage(language)];
   const [tab, setTab] = useState<StatsTab>("overview");
+  const official = stats?.official;
+  const officialOverview = tab === "overview" && official && official.status !== "not_applicable";
   let state: "loading" | "empty" | "unavailable" | null = null;
-  if (failed || stats?.status === "unavailable" || (!stats && !loading)) state = "unavailable";
+  if (failed || (!officialOverview && stats?.status === "unavailable") || (!stats && !loading)) state = "unavailable";
   else if (!stats && loading) state = "loading";
-  else if (stats?.status === "empty") state = "empty";
+  else if (!officialOverview && stats?.status === "empty") state = "empty";
 
   return (
     <section className="usage-stats-panel">
@@ -322,8 +339,10 @@ export const UsageStatsPanel = memo(function UsageStatsPanel({ stats, loading, f
         <button type="button" role="tab" aria-selected={tab === "overview"} className={tab === "overview" ? "is-active" : ""} onClick={() => setTab("overview")}>{t.statsOverview}</button>
         <button type="button" role="tab" aria-selected={tab === "models"} className={tab === "models" ? "is-active" : ""} onClick={() => setTab("models")}>{t.modelsTab}</button>
       </div>
-      {state ? <StatsPlaceholder kind={state} language={language} /> : stats ? (tab === "overview" ? <Overview stats={stats} language={language} /> : <Models stats={stats} language={language} />) : null}
-      <footer className="stats-source"><LockKey /><span>{t.localStatsPrivacy}</span>{stats?.skippedFiles ? <em>{t.partialStats(stats.skippedFiles)}</em> : null}</footer>
+      {state ? <StatsPlaceholder kind={state} language={language} /> : officialOverview && official.status !== "ok" ? (
+        <div className="stats-placeholder stats-placeholder--unavailable" role="alert"><span><Database /></span><strong>{t.officialStatsUnavailable}</strong><p>{t.officialStatsUnavailableHint}</p></div>
+      ) : stats ? (tab === "overview" ? <Overview stats={stats} official={officialOverview ? official : undefined} language={language} /> : <Models stats={stats} language={language} />) : null}
+      <footer className="stats-source"><LockKey /><span>{officialOverview ? t.officialStatsPrivacy : t.localStatsPrivacy}</span>{tab === "models" && stats?.skippedFiles ? <em>{t.partialStats(stats.skippedFiles)}</em> : null}</footer>
       {loading && stats ? <div className="stats-refreshing" role="status"><ClockCounterClockwise className="is-spinning" />{t.statsRefreshing}</div> : null}
     </section>
   );

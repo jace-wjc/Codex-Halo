@@ -1,4 +1,4 @@
-import type { DailyTokenUsage, Language, ModelTokenUsage } from "../types";
+import type { DailyTokenUsage, Language, ModelTokenUsage, OfficialUsageBucket } from "../types";
 
 export type UsageRange = "7d" | "30d" | "all";
 export type ActivityMode = "daily" | "weekly" | "cumulative";
@@ -186,6 +186,34 @@ export function buildWeeklyActivity(
     filledCells: totalTokens > 0 && maximum > 0
       ? Math.min(7, Math.max(1, Math.ceil((totalTokens / maximum) * 7)))
       : 0,
+  }));
+}
+
+/** Keep the server's weekly/cumulative totals rather than adding cumulative days. */
+export function buildOfficialWeeklyActivity(
+  buckets: OfficialUsageBucket[], cumulative: boolean, now = new Date(),
+): WeeklyActivity[] {
+  const start = activityGridStart(now);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const weekly = new Map<number, number>();
+  let before = 0;
+  for (const bucket of [...buckets].sort((a, b) => a.date.localeCompare(b.date))) {
+    const date = parseDate(bucket.date);
+    if (date > today) continue;
+    const week = Math.floor((calendarDayIndex(date) - calendarDayIndex(start)) / 7);
+    if (week < 0) before = bucket.totalTokens;
+    else if (week < 53) weekly.set(week, bucket.totalTokens);
+  }
+  let previous = cumulative ? before : 0;
+  const totals = Array.from({ length: 53 }, (_, week) => {
+    const value = weekly.get(week) ?? (cumulative ? previous : 0);
+    previous = value;
+    return value;
+  });
+  const maximum = Math.max(0, ...totals);
+  return totals.map((totalTokens, week) => ({
+    week, weekStart: dateKey(addDays(start, week * 7)), totalTokens,
+    filledCells: totalTokens > 0 && maximum > 0 ? Math.min(7, Math.max(1, Math.ceil(totalTokens / maximum * 7))) : 0,
   }));
 }
 

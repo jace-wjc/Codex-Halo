@@ -2,8 +2,8 @@
 
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import type { UsageStats } from "../types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OfficialUsage, UsageStats } from "../types";
 import { UsageStatsPanel } from "./UsageStatsPanel";
 
 const emptyStats: UsageStats = {
@@ -64,9 +64,57 @@ const usageStats: UsageStats = {
   ],
 };
 
-afterEach(cleanup);
+beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date(2026, 6, 15, 12)); });
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+const official: OfficialUsage = {
+  status: "ok", generatedAt: "2026-07-15T00:00:00Z", totalTokens: 1_234_000,
+  asOf: "2026-07-14",
+  peakDailyTokens: 700_000, sessionCount: 88, longestRunningTurnSeconds: 300,
+  currentStreak: 20, longestStreak: 22,
+  daily: [{ date: "2026-07-15", totalTokens: 500_000 }],
+  weekly: [{ date: "2026-07-12", totalTokens: 600_000 }],
+  cumulative: [{ date: "2026-07-15", totalTokens: 1_234_000 }],
+};
 
 describe("UsageStatsPanel states", () => {
+  it("shows the official cutoff rather than the request time", () => {
+    render(<UsageStatsPanel stats={{ ...usageStats, official }} loading={false} failed={false} language="en" />);
+    expect(screen.getByText(/Official data through/)).toHaveTextContent("Jul 14, 2026");
+    expect(screen.getByText(/Official data through/)).not.toHaveTextContent("Jul 15");
+  });
+
+  it("does not fabricate an official cutoff when the server omits it", () => {
+    render(<UsageStatsPanel stats={{ ...usageStats, official: { ...official, asOf: null } }} loading={false} failed={false} language="zh-CN" />);
+    expect(screen.getByText(/数据可能延迟更新/)).toBeInTheDocument();
+    expect(screen.queryByText(/官方统计截至/)).not.toBeInTheDocument();
+  });
+  it("uses official totals and streaks while keeping Models local", () => {
+    const { container } = render(<UsageStatsPanel stats={{ ...usageStats, official }} loading={false} failed={false} language="en" />);
+    expect(container.querySelector(".stats-summary-grid")).toHaveTextContent("1.2M");
+    expect(container.querySelector(".stats-summary-grid")).toHaveTextContent("700K");
+    expect(container.querySelector(".stats-summary-grid")).toHaveTextContent("88");
+    expect(container.querySelector(".stats-summary-grid")).not.toHaveTextContent("4K");
+    expect(screen.queryByText("Input tokens")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Models" }));
+    expect(container.querySelector(".token-chart-card")).toHaveTextContent("4K");
+    expect(screen.getByText(/Local model details/)).toBeInTheDocument();
+  });
+
+  it("never replaces failed official totals with local totals", () => {
+    render(<UsageStatsPanel stats={{ ...usageStats, official: { ...official, status: "unavailable", totalTokens: null } }} loading={false} failed={false} language="en" />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Official usage statistics unavailable");
+    expect(screen.queryByText("3.6K")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Models" }));
+    expect(screen.getByTestId("token-chart")).toBeInTheDocument();
+  });
+
+  it("shows official statistics even when local history is empty", () => {
+    render(<UsageStatsPanel stats={{ ...emptyStats, official }} loading={false} failed={false} language="en" />);
+    expect(screen.getByText("1.2M")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Models" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("No usage to show yet");
+  });
   it("explains that the initial index may take longer", () => {
     render(<UsageStatsPanel stats={null} loading failed={false} language="zh-CN" />);
     expect(screen.getByRole("status")).toHaveTextContent("正在建立本地统计");

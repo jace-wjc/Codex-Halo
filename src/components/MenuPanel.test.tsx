@@ -159,6 +159,7 @@ describe("MenuPanel", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Models" }));
     expect(screen.getByText("Tokens per Day")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "全部时间" }));
     expect(screen.getAllByText("GPT 5.4")).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "刷新额度与本地使用统计" }));
     expect(onRefresh).toHaveBeenCalledOnce();

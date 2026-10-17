@@ -341,6 +341,7 @@ button:focus-visible { outline: 2px solid rgba(63, 105, 156, .72); outline-offse
 .stats-tabs button.is-active { color: var(--text); }
 .stats-tabs button.is-active::after { background: var(--accent); }
 .stats-overview, .stats-models { padding-top: 11px; }
+.stats-scope-note { margin: 8px 2px; color: var(--text-tertiary); font-size: 8px; line-height: 1.5; }
 .stats-summary-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: #fff; }
 .stats-summary-grid article { min-width: 0; min-height: 60px; grid-column: span 2; padding: 9px 8px 8px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); text-align: center; }
 .stats-summary-grid article:nth-child(3), .stats-summary-grid article:nth-child(5) { border-right: 0; }

@@ -161,7 +161,7 @@ export default function App() {
     setUsageLoading(true);
     setUsageFailed(false);
     try {
-      setUsageStats(await getUsageStats());
+      setUsageStats(await getUsageStats(force));
       usageLoadedAtRef.current = Date.now();
     } catch {
       setUsageFailed(true);

@@ -5,6 +5,7 @@ import {
   buildActivityMonthLabels,
   buildHeatmap,
   buildWeeklyActivity,
+  buildOfficialWeeklyActivity,
   fillUsageRange,
   formatModelName,
   linePath,
@@ -29,6 +30,20 @@ const day = (date: string, totalTokens: number, model = "gpt-5.4"): DailyTokenUs
 });
 
 describe("usage helpers", () => {
+  it("uses server cumulative buckets without summing cumulative days again", () => {
+    const weeks = buildOfficialWeeklyActivity([
+      { date: "2026-07-05", totalTokens: 100 },
+      { date: "2026-07-06", totalTokens: 150 },
+    ], true, new Date(2026, 6, 15));
+    expect(weeks.at(-2)?.totalTokens).toBe(150);
+    expect(weeks.at(-1)?.totalTokens).toBe(150);
+  });
+
+  it("preserves the official weekly value and does not carry weekly usage forward", () => {
+    const weeks = buildOfficialWeeklyActivity([{ date: "2026-07-05", totalTokens: 123 }], false, new Date(2026, 6, 15));
+    expect(weeks.at(-2)?.totalTokens).toBe(123);
+    expect(weeks.at(-1)?.totalTokens).toBe(0);
+  });
   it("fills fixed ranges without inventing token values", () => {
     const rows = fillUsageRange([day("2026-07-14", 100)], "7d", new Date(2026, 6, 15));
     expect(rows).toHaveLength(7);

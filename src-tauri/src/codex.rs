@@ -1,6 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use chrono::Utc;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
 use serde_json::Value;
 
@@ -8,6 +9,7 @@ use crate::models::{ProviderSnapshot, UsageWindow};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const PROFILE_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/profiles/me";
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_AUTH_BYTES: u64 = 256 * 1024;
 
@@ -51,6 +53,17 @@ fn auth_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
         .map(|home| home.join("auth.json"))
+}
+
+pub fn usage_auth_revision() -> Option<String> {
+    let path = auth_path()?;
+    let metadata = fs::metadata(&path).ok()?;
+    Some(format!(
+        "{}:{}:{:?}",
+        path.display(),
+        metadata.len(),
+        metadata.modified().ok()?
+    ))
 }
 
 fn pick_string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -114,6 +127,94 @@ fn headers(auth: &Auth) -> Result<HeaderMap, &'static str> {
         result.insert("ChatGPT-Account-Id", value);
     }
     Ok(result)
+}
+
+fn parse_official_usage(value: &Value) -> Result<crate::usage_stats::OfficialUsage, ()> {
+    use crate::usage_stats::{OfficialUsage, OfficialUsageBucket};
+    if value
+        .pointer("/metadata/stats_error")
+        .and_then(Value::as_str)
+        .is_some_and(|error| !error.trim().is_empty())
+    {
+        return Err(());
+    }
+    let stats = value.get("stats").filter(|v| v.is_object()).ok_or(())?;
+    let counters = stats
+        .get("agentic")
+        .filter(|v| v.is_object())
+        .unwrap_or(stats);
+    let read_count = |data: &Value, key: &str| -> Result<Option<u64>, ()> {
+        match data.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value.as_u64().map(Some).ok_or(()),
+        }
+    };
+    let buckets = |key: &str| -> Result<Vec<OfficialUsageBucket>, ()> {
+        let Some(value) = stats.get(key).filter(|v| !v.is_null()) else {
+            return Ok(Vec::new());
+        };
+        let mut rows = Vec::new();
+        let mut dates = std::collections::BTreeSet::new();
+        for bucket in value.as_array().ok_or(())? {
+            let date = bucket.get("start_date").and_then(Value::as_str).ok_or(())?;
+            chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| ())?;
+            if !dates.insert(date) {
+                return Err(());
+            }
+            rows.push(OfficialUsageBucket {
+                date: date.into(),
+                total_tokens: bucket.get("tokens").and_then(Value::as_u64).ok_or(())?,
+            });
+        }
+        rows.sort_by(|a, b| a.date.cmp(&b.date));
+        Ok(rows)
+    };
+    let total_tokens = read_count(counters, "lifetime_tokens")?;
+    if total_tokens.is_none() {
+        return Err(());
+    }
+    Ok(OfficialUsage {
+        status: "ok".into(),
+        generated_at: Utc::now().to_rfc3339(),
+        as_of: value
+            .pointer("/metadata/stats_as_of")
+            .and_then(Value::as_str)
+            .filter(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok())
+            .map(str::to_owned),
+        total_tokens,
+        peak_daily_tokens: read_count(counters, "peak_daily_tokens")?,
+        session_count: read_count(stats, "total_threads")?,
+        longest_running_turn_seconds: read_count(counters, "longest_running_turn_sec")?,
+        current_streak: read_count(stats, "current_streak_days")?,
+        longest_streak: read_count(stats, "longest_streak_days")?,
+        daily: buckets("daily_usage_buckets")?,
+        weekly: buckets("weekly_usage_buckets")?,
+        cumulative: buckets("cumulative_daily_usage_buckets")?,
+    })
+}
+
+/// Account history is deliberately independent of the quota refresh scheduler.
+pub async fn fetch_official_usage(client: &reqwest::Client) -> crate::usage_stats::OfficialUsage {
+    use crate::usage_stats::OfficialUsage;
+    let auth = match load_auth() {
+        Ok(auth) => auth,
+        Err(error) => return OfficialUsage::unavailable(error.status),
+    };
+    let Ok(headers) = headers(&auth) else {
+        return OfficialUsage::unavailable("signed_out");
+    };
+    let response = match client.get(PROFILE_USAGE_URL).headers(headers).send().await {
+        Ok(response) if response.status().is_success() => response,
+        _ => return OfficialUsage::unavailable("unavailable"),
+    };
+    match limited_json(response)
+        .await
+        .ok()
+        .and_then(|value| parse_official_usage(&value).ok())
+    {
+        Some(usage) => usage,
+        None => OfficialUsage::unavailable("unavailable"),
+    }
 }
 
 fn number_with_key<'a>(value: &'a Value, keys: &[&'a str]) -> Option<(&'a str, f64)> {
@@ -542,6 +643,79 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_overview_keeps_server_summary_and_bucket_values() {
+        let usage = parse_official_usage(&serde_json::json!({"stats": {
+            "lifetime_tokens": 1234, "peak_daily_tokens": 900,
+            "current_streak_days": 3, "longest_streak_days": 5, "total_threads": 4,
+            "daily_usage_buckets": [{"start_date":"2026-10-16","tokens":500}],
+            "weekly_usage_buckets": [{"start_date":"2026-10-11","tokens":800}],
+            "cumulative_daily_usage_buckets": [{"start_date":"2026-10-16","tokens":1234}]
+        },"metadata": {"stats_error": null,"stats_as_of":"2026-07-10"}}))
+        .unwrap();
+        assert_eq!(usage.total_tokens, Some(1234));
+        assert_eq!(usage.peak_daily_tokens, Some(900));
+        assert_eq!(usage.daily[0].total_tokens, 500);
+        assert_eq!(usage.weekly[0].total_tokens, 800);
+        assert_eq!(usage.cumulative[0].total_tokens, 1234);
+        assert_eq!(usage.longest_running_turn_seconds, None);
+        assert_eq!(usage.as_of.as_deref(), Some("2026-07-10"));
+    }
+
+    #[test]
+    fn official_overview_rejects_errors_and_malformed_numbers_without_zero_fallbacks() {
+        for value in [
+            serde_json::json!({"stats": {}}),
+            serde_json::json!({"stats": {"lifetime_tokens": -1}}),
+            serde_json::json!({"stats": {"lifetime_tokens": 10}, "metadata": {"stats_error": "upstream error"}}),
+            serde_json::json!({"stats": {"lifetime_tokens": 10, "daily_usage_buckets": [{"start_date":"bad","tokens":12}]}}),
+        ] {
+            assert!(parse_official_usage(&value).is_err());
+        }
+        assert_eq!(
+            parse_official_usage(&serde_json::json!({"stats":{"lifetime_tokens":0}}))
+                .unwrap()
+                .total_tokens,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn official_cutoff_is_never_inferred_from_the_fetch_time() {
+        for metadata in [
+            serde_json::json!({}),
+            serde_json::json!({"stats_as_of":"not-a-date"}),
+        ] {
+            let usage = parse_official_usage(
+                &serde_json::json!({"stats":{"lifetime_tokens":123},"metadata":metadata}),
+            )
+            .unwrap();
+            assert_eq!(usage.total_tokens, Some(123));
+            assert_eq!(usage.as_of, None);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "uses existing ChatGPT login for read-only statistics, never calls a model"]
+    async fn live_official_overview() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let stats = fetch_official_usage(&client).await;
+        println!(
+            "official status={}, total={:?}, as_of={:?}, active buckets={}",
+            stats.status,
+            stats.total_tokens,
+            stats.as_of,
+            stats.daily.len()
+        );
+        assert_eq!(stats.status, "ok");
+        assert!(stats.total_tokens.is_some());
+    }
+
 
     #[test]
     fn distinguishes_missing_login_from_transient_auth_io_failures() {

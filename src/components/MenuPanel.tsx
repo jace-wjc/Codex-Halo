@@ -318,7 +318,7 @@ export const MenuPanel = memo(function MenuPanel({
         </div>
         <div className="panel-header__actions">
           {section === "stats" ? (
-            <span className="status-pill status-pill--local" title={t.localData}><i aria-hidden="true" />{t.localData}</span>
+            <span className="status-pill status-pill--local" title={t.statsSources}><i aria-hidden="true" />{t.statsSources}</span>
           ) : (
             <span className={`status-pill status-pill--${snapshot.status} status-pill--${tier}`} title={statusLabel}>
               <i aria-hidden="true" />{statusLabel}

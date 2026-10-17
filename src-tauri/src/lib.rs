@@ -85,6 +85,7 @@ struct AppState {
     refresh_lock: tokio::sync::Mutex<()>,
     usage_index_path: PathBuf,
     usage_refresh_lock: tokio::sync::Mutex<()>,
+    usage_cache: Mutex<Option<(Instant, Option<String>, usage_stats::UsageStats)>>,
     scheduler_notify: tokio::sync::Notify,
     geometry: GeometryController,
     tray_menu: Mutex<Option<TrayMenuItems>>,
@@ -1035,12 +1036,31 @@ async fn refresh_snapshots(
 }
 
 #[tauri::command]
-async fn get_usage_stats(state: State<'_, AppState>) -> Result<usage_stats::UsageStats, String> {
+async fn get_usage_stats(
+    force: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<usage_stats::UsageStats, String> {
     let _refresh = state.usage_refresh_lock.lock().await;
+    let auth_revision = codex::usage_auth_revision();
+    if !force.unwrap_or(false) {
+        if let Some((fetched, revision, stats)) = lock_unpoison(&state.usage_cache).as_ref() {
+            if *revision == auth_revision && fetched.elapsed() < Duration::from_secs(60) {
+                return Ok(stats.clone());
+            }
+        }
+    }
     let index_path = state.usage_index_path.clone();
-    tokio::task::spawn_blocking(move || usage_stats::load_usage_stats(&index_path))
-        .await
-        .map_err(|_| "usage statistics task failed".to_string())?
+    let (local, official) = tokio::join!(
+        tokio::task::spawn_blocking(move || usage_stats::load_usage_stats(&index_path)),
+        codex::fetch_official_usage(&state.client),
+    );
+    let mut stats = local
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_else(usage_stats::UsageStats::unavailable);
+    stats.official = Some(official);
+    *lock_unpoison(&state.usage_cache) = Some((Instant::now(), auth_revision, stats.clone()));
+    Ok(stats)
 }
 
 #[tauri::command]
@@ -1209,7 +1229,7 @@ pub fn run() {
             let data_dir = app.path().app_config_dir()?;
             migrate_legacy_app_data(&data_dir);
             let preferences_path = data_dir.join("preferences.json");
-            let usage_index_path = data_dir.join("usage-index-v1.json");
+            let usage_index_path = data_dir.join("usage-index-v4.json");
             let preferences = load_preferences(&preferences_path);
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(12))
@@ -1226,6 +1246,7 @@ pub fn run() {
                 refresh_lock: tokio::sync::Mutex::new(()),
                 usage_index_path,
                 usage_refresh_lock: tokio::sync::Mutex::new(()),
+                usage_cache: Mutex::new(None),
                 scheduler_notify: tokio::sync::Notify::new(),
                 geometry: GeometryController::default(),
                 tray_menu: Mutex::new(None),
