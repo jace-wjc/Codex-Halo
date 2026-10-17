@@ -74,12 +74,14 @@ function RefreshIntervalSetting({
   seconds,
   nextRefreshAt,
   language,
+  apiMode,
   pending,
   onChange,
 }: {
   seconds: number | null;
   nextRefreshAt: string | null;
   language: Language;
+  apiMode: boolean;
   pending: boolean;
   onChange: (seconds: number | null) => void;
 }) {
@@ -128,13 +130,15 @@ function RefreshIntervalSetting({
     }).format(nextDate))
     : null;
   const intervalLabel = formatRefreshInterval(seconds, language);
+  const settingLabel = apiMode ? t.apiAutoRefresh : t.quotaAutoRefresh;
+  const settingHint = apiMode ? t.apiRefreshIntervalHint : t.refreshIntervalHint;
 
   return (
     <>
       <button type="button" className="setting-row" onClick={openDialog} disabled={pending}>
         <span className="setting-row__icon" aria-hidden="true"><Timer /></span>
         <span className="setting-row__copy">
-          <strong>{t.quotaAutoRefresh}</strong>
+          <strong>{settingLabel}</strong>
           <small>{seconds === null || !nextLabel ? intervalLabel : `${intervalLabel} · ${nextLabel}`}</small>
         </span>
         {pending ? <SpinnerGap className="is-spinning setting-row__pending" /> : <CaretRight className="setting-row__chevron" aria-hidden="true" />}
@@ -161,7 +165,7 @@ function RefreshIntervalSetting({
               <span className="setting-row__icon" aria-hidden="true"><Timer /></span>
               <div>
                 <strong id="refresh-interval-title">{t.refreshIntervalTitle}</strong>
-                <p>{t.refreshIntervalHint}</p>
+                <p>{settingHint}</p>
               </div>
             </div>
 
@@ -223,7 +227,7 @@ function RefreshIntervalSetting({
             {valid && draftSeconds === 10 ? (
               <p className="refresh-interval-message refresh-interval-message--warning"><WarningCircle />{t.refreshHighFrequencyWarning}</p>
             ) : null}
-            {valid && draftSeconds === null ? <p className="refresh-interval-message">{t.refreshIntervalManualHint}</p> : null}
+            {valid && draftSeconds === null ? <p className="refresh-interval-message">{apiMode ? t.apiRefreshIntervalManualHint : t.refreshIntervalManualHint}</p> : null}
             {valid && draftSeconds !== null && draftSeconds !== 10 ? <p className="refresh-interval-message">{t.refreshIntervalScheduleHint}</p> : null}
 
             <div className="refresh-interval-actions">
@@ -288,7 +292,14 @@ export const MenuPanel = memo(function MenuPanel({
   const language = normalizeLanguage(preferences.language);
   const t = copy[language];
   const tier = overallQuotaTier(snapshot);
-  const statusLabel = snapshot.status === "loading"
+  const apiMode = snapshot.authMode === "api_key";
+  const statusLabel = apiMode
+    ? snapshot.status === "unavailable"
+      ? t.apiUsageUnavailable
+      : snapshot.status === "stale"
+        ? t.dataStale
+        : t.apiUsageBased
+    : snapshot.status === "loading"
     ? t.loadingQuota
     : snapshot.status === "signed_out"
       ? t.notSignedIn
@@ -314,13 +325,13 @@ export const MenuPanel = memo(function MenuPanel({
       <header className="panel-header">
         <div className="panel-brand">
           <ProviderMark />
-          <div><strong>{t.appName}</strong><span>{section === "stats" ? t.usageStats : snapshot.plan ?? t.accountFallback}</span></div>
+          <div><strong>{t.appName}</strong><span>{section === "stats" ? t.usageStats : apiMode ? t.apiUsageBased : snapshot.plan ?? t.accountFallback}</span></div>
         </div>
         <div className="panel-header__actions">
           {section === "stats" ? (
-            <span className="status-pill status-pill--local" title={t.statsSources}><i aria-hidden="true" />{t.statsSources}</span>
+            <span className="status-pill status-pill--local" title={apiMode ? t.localData : t.statsSources}><i aria-hidden="true" />{apiMode ? t.localData : t.statsSources}</span>
           ) : (
-            <span className={`status-pill status-pill--${snapshot.status} status-pill--${tier}`} title={statusLabel}>
+            <span className={`status-pill status-pill--${snapshot.status} status-pill--${tier}${apiMode ? " status-pill--api" : ""}`} title={statusLabel}>
               <i aria-hidden="true" />{statusLabel}
             </span>
           )}
@@ -329,7 +340,7 @@ export const MenuPanel = memo(function MenuPanel({
             className="refresh-button"
             onClick={onRefresh}
             disabled={actionLoading}
-            aria-label={t.refreshAll}
+            aria-label={apiMode ? t.apiRefreshAll : t.refreshAll}
           >
             {actionLoading ? <SpinnerGap className="is-spinning" /> : <ArrowClockwise />}
             <span>{actionLoading ? t.refreshing : t.refresh}</span>
@@ -338,7 +349,7 @@ export const MenuPanel = memo(function MenuPanel({
       </header>
 
       <nav className="panel-section-tabs" aria-label={t.panelSections}>
-        <button type="button" className={section === "quota" ? "is-active" : ""} aria-current={section === "quota" ? "page" : undefined} onClick={() => handleSection("quota")}>{t.panelTitle}</button>
+        <button type="button" className={section === "quota" ? "is-active" : ""} aria-current={section === "quota" ? "page" : undefined} onClick={() => handleSection("quota")}>{apiMode ? t.apiPanelTitle : t.panelTitle}</button>
         <button type="button" className={section === "stats" ? "is-active" : ""} aria-current={section === "stats" ? "page" : undefined} onClick={() => handleSection("stats")}>{t.usageStats}</button>
       </nav>
 
@@ -373,6 +384,7 @@ export const MenuPanel = memo(function MenuPanel({
                 seconds={preferences.quotaRefreshIntervalSeconds}
                 nextRefreshAt={nextRefreshAt}
                 language={language}
+                apiMode={apiMode}
                 pending={pendingAction === "refreshInterval"}
                 onChange={onSetRefreshInterval}
               />

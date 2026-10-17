@@ -1,10 +1,12 @@
 # Codex Halo
 
-Native-feeling desktop quota monitor for the local Codex Desktop login state, with a compact floating widget and a synchronized macOS menu bar panel.
+Native-feeling desktop monitor for Codex ChatGPT quota and API-key usage mode, with a compact floating widget and a synchronized macOS menu bar panel.
 
 ## Highlights
 
 - Shows your Codex plan, every usage window currently returned by Codex (including weekly-only or 5-hour + weekly modes), next reset time, and reset-credit availability.
+- Detects API-key authentication without misreporting it as a signed-out ChatGPT session; API users get an explicit usage-based state and keep the local Usage Stats dashboard.
+- Optionally reads real organization-wide token, request, and USD cost totals from the official OpenAI Usage and Costs APIs when an `OPENAI_ADMIN_KEY` is supplied to the app process. It never labels cost as balance or estimates remaining API credit.
 - Displays compact live quota text in the macOS menu bar; Windows falls back to a tray icon, tooltip, and context menu.
 - Uses clear quota states for healthy, caution, and critical remaining usage.
 - Collapses into a small floating orb when idle, then expands on hover.
@@ -32,15 +34,29 @@ codex, quota, tauri, react, rust, desktop-app, windows, macos, productivity
 
 ## How It Works
 
-Codex Halo reads the existing Codex Desktop login state on your machine and queries Codex/ChatGPT quota and account-statistics endpoints with that session. The existing authentication reader, endpoint parser, and privacy boundary remain in the Rust desktop process. Quota values come only from normalized service snapshots; local token counts are displayed separately as usage statistics and are never used to estimate remaining quota. The app does not redeem reset credits or modify account settings.
+Codex Halo reads the existing Codex Desktop login state on your machine. A ChatGPT access-token session continues to use the existing Codex/ChatGPT quota endpoints. When the local auth state instead indicates API-key authentication, Halo does not call those subscription endpoints and does not show a false signed-out or zero-quota state. API requests are usage based, so ChatGPT 5-hour and weekly quota cards are replaced with an explicit API mode. The authentication reader, endpoint parser, and privacy boundary remain in the Rust desktop process.
 
-Overview reads the official account profile usage endpoint and preserves its summary, cutoff date and activity buckets. An unavailable official response is shown explicitly rather than replaced with local totals.
+Quota values come only from normalized service snapshots; local token counts are displayed separately as usage statistics and are never used to estimate remaining quota. The app does not redeem reset credits or modify account settings.
+
+### Optional organization usage for API-key accounts
+
+The normal project API key cannot read organization billing totals. Advanced monitoring is therefore disabled by default. If the Codex account uses API-key authentication and the Codex Halo process has an `OPENAI_ADMIN_KEY`, Halo performs read-only requests to the official [Completions Usage API](https://platform.openai.com/docs/api-reference/usage/completions) and [Costs API](https://platform.openai.com/docs/api-reference/usage/costs). The panel then shows UTC daily and month-to-date organization totals for input tokens, cached input, output tokens, requests, and USD cost.
+
+For local development, pass the key only to the process that launches Tauri:
+
+```bash
+OPENAI_ADMIN_KEY="your-admin-key" npm run tauri dev
+```
+
+Codex Halo does not provide a plaintext key field and does not persist this Admin key. The key stays in the native process and is sent only to fixed `https://api.openai.com` organization Usage/Costs endpoints. These totals can cover the organization rather than one project key. Cost is not prepaid balance; current balance remains available in the OpenAI billing dashboard. Because an Admin key is privileged, leave this integration disabled unless organization totals are needed.
+
+For ChatGPT sessions, Overview reads the official account profile usage endpoint and preserves its summary and activity buckets. An unavailable official response is shown explicitly rather than replaced with local totals. API-key sessions retain a clearly labeled local overview.
 
 Models is built on demand from metadata and token counters in `CODEX_HOME/sessions` and `CODEX_HOME/archived_sessions`, including `.jsonl.zst` compressed history. Plain/compressed copies share a logical index entry. Forks' leading replayed counters are matched against their actual ancestors without relying on rewritten timestamps; independent and sibling sessions remain separate, and real requests after counter resets are retained. Copies of one session are deduplicated with occurrence counts so repeated legitimate requests are not lost. Local totals can differ from account totals. The versioned cache automatically rebuilds older indexes, verifies previously indexed content before appending, and rebuilds rewritten files; compressed history is decoded inside the application without requiring an external zstd installation. Overview shows the official statistics cutoff date when supplied. Conversation text and tool output are never retained or uploaded.
 
 The detail-panel refresh action updates quota, official statistics and the local usage index together. Configurable background scheduling remains quota-only; statistics revalidate on demand after 60 seconds or when refreshed manually. Statistics requests use their own lock and do not change the quota scheduler. Changing the quota interval restarts the timer without issuing an immediate request. Manual-only mode disables periodic network requests after the initial startup read.
 
-The production web entry never substitutes mock quota. A development-only `?designer` route contains explicit visual fixtures for component work. Real quota reading requires the Tauri desktop app and an existing Codex Desktop login on the same machine.
+The production web entry never substitutes mock quota or API cost. Automated tests and the development-only `?designer` route use explicit fixtures only. Real quota or organization usage reading requires the Tauri desktop app and the corresponding local authentication on the same machine.
 
 ## Download
 
@@ -73,8 +89,10 @@ https://github.com/xhzwjc/Codex-Halo/issues
 
 Codex Halo is local-first and intentionally narrow:
 
-- Reads the local Codex Desktop login state only to query Codex quota.
+- Reads the local Codex Desktop login state to distinguish ChatGPT and API-key authentication.
 - Sends the existing Codex access token only to ChatGPT quota and account-statistics endpoints.
+- Does not use the normal project API key for Halo network requests and never exposes it to the frontend.
+- When explicitly provided through the process environment, sends the optional Admin key only to the fixed official OpenAI organization Usage and Costs endpoints; it is not persisted.
 - Stores widget preferences and a local aggregate usage index in its own app config directory.
 - The versioned usage index contains session identifiers, counter fingerprints, timestamps, model totals and the selected source directory; it contains no conversation text or tool output.
 - Does not store Codex tokens, account IDs, prompts, chat history, raw quota responses, or local auth paths.

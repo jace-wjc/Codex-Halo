@@ -2,7 +2,7 @@
 
 ## Supported Use
 
-Codex Halo is a local desktop utility that reads Codex quota using the user's existing Codex Desktop login state.
+Codex Halo is a local desktop utility that reads Codex quota using the user's existing Codex Desktop login state and safely distinguishes API-key authentication from ChatGPT subscription authentication.
 
 ## Reporting Issues
 
@@ -15,6 +15,9 @@ Please do not open public issues containing tokens, account IDs, raw backend res
 - The app caps auth file reads at 256 KB and quota responses at 1 MB.
 - The app does not follow redirects for quota HTTP requests.
 - The app does not redeem reset credits or change account settings.
+- The standard project API key is never sent by Codex Halo or exposed to the frontend.
+- Optional `OPENAI_ADMIN_KEY` support is environment-only, remains in the native process, uses fixed `api.openai.com` Usage/Costs endpoints, caps pagination, and does not persist raw responses.
+- Unknown Admin API response shapes fail closed instead of producing default totals. Organization cost is never represented as account balance.
 
 ## Release Notes For Maintainers
 

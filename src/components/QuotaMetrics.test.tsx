@@ -112,4 +112,60 @@ describe("QuotaMetrics", () => {
     expect(screen.getByText("Codex 登录文件暂时无法读取，应用将自动重试。")).toBeInTheDocument();
     expect(screen.queryByText("请先登录 Codex")).not.toBeInTheDocument();
   });
+
+  it("treats API-key auth as usage based instead of signed out", () => {
+    render(
+      <QuotaMetrics
+        snapshot={{
+          ...success,
+          authMode: "api_key",
+          plan: "API",
+          shortWindow: null,
+          weeklyWindow: null,
+          resetCredits: null,
+          apiUsage: {
+            status: "not_configured",
+            today: { inputTokens: null, cachedInputTokens: null, outputTokens: null, requests: null, costUsd: null },
+            monthToDate: { inputTokens: null, cachedInputTokens: null, outputTokens: null, requests: null, costUsd: null },
+            updatedAt: "2026-07-15T00:00:00Z",
+            message: null,
+          },
+        }}
+        language="en"
+      />,
+    );
+    expect(screen.getByText("Usage-based API account")).toBeInTheDocument();
+    expect(screen.getByText(/5-hour and weekly quotas do not apply/)).toBeInTheDocument();
+    expect(screen.getByText(/OPENAI_ADMIN_KEY/)).toBeInTheDocument();
+    expect(screen.queryByText("Sign in to Codex")).not.toBeInTheDocument();
+    expect(screen.queryByText("5-hour quota")).not.toBeInTheDocument();
+  });
+
+  it("shows only real mock organization totals and labels cost as non-balance data", () => {
+    render(
+      <QuotaMetrics
+        snapshot={{
+          ...success,
+          authMode: "api_key",
+          plan: "API",
+          shortWindow: null,
+          weeklyWindow: null,
+          resetCredits: null,
+          apiUsage: {
+            status: "ok",
+            today: { inputTokens: 400, cachedInputTokens: 100, outputTokens: 80, requests: 2, costUsd: 0.25 },
+            monthToDate: { inputTokens: 12000, cachedInputTokens: 3000, outputTokens: 2400, requests: 35, costUsd: 7.5 },
+            updatedAt: new Date().toISOString(),
+            message: null,
+          },
+        }}
+        language="en"
+      />,
+    );
+    expect(screen.getByText("$7.50")).toBeInTheDocument();
+    expect(screen.getByText("$0.25")).toBeInTheDocument();
+    expect(screen.getByText("12K")).toBeInTheDocument();
+    expect(screen.getByText("2.4K")).toBeInTheDocument();
+    expect(screen.getByText(/not prepaid balance/)).toBeInTheDocument();
+  });
 });

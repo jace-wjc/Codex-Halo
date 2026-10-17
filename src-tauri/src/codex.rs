@@ -1,24 +1,34 @@
 use std::{fs, path::PathBuf};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use chrono::Utc;
+use chrono::{Datelike, TimeZone, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
 use serde_json::Value;
 
-use crate::models::{ProviderSnapshot, UsageWindow};
+use crate::models::{
+    ApiUsagePeriod, ApiUsageStatus, ApiUsageSummary, AuthMode, ProviderSnapshot, UsageWindow,
+};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const PROFILE_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/profiles/me";
+const ADMIN_USAGE_URL: &str = "https://api.openai.com/v1/organization/usage/completions";
+const ADMIN_COSTS_URL: &str = "https://api.openai.com/v1/organization/costs";
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_AUTH_BYTES: u64 = 256 * 1024;
+const MAX_ADMIN_PAGES: usize = 10;
 
 struct Auth {
     access_token: String,
     account_id: Option<String>,
 }
 
-#[derive(Clone, Copy)]
+enum LocalAuth {
+    Chatgpt(Auth),
+    ApiKey,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct AuthFailure {
     status: &'static str,
     message: &'static str,
@@ -70,6 +80,10 @@ fn pick_string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| value.get(*key)?.as_str())
 }
 
+fn pick_nonempty_string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    pick_string(value, keys).filter(|item| !item.trim().is_empty())
+}
+
 fn account_id_from_jwt(token: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
@@ -84,7 +98,54 @@ fn account_id_from_jwt(token: &str) -> Option<String> {
     .map(str::to_owned)
 }
 
-fn load_auth() -> Result<Auth, AuthFailure> {
+fn parse_local_auth(value: &Value) -> Result<LocalAuth, AuthFailure> {
+    let tokens = value.get("tokens").unwrap_or(value);
+    let chatgpt_auth = || {
+        let access_token = pick_nonempty_string(tokens, &["access_token", "accessToken"])
+            .ok_or_else(|| AuthFailure::signed_out("Codex login expired. Please sign in again."))?;
+        let account_id = pick_nonempty_string(tokens, &["account_id", "accountId"])
+            .map(str::to_owned)
+            .or_else(|| account_id_from_jwt(access_token));
+        Ok(LocalAuth::Chatgpt(Auth {
+            access_token: access_token.to_owned(),
+            account_id,
+        }))
+    };
+
+    let auth_mode = pick_nonempty_string(value, &["auth_mode", "authMode"])
+        .or_else(|| pick_nonempty_string(tokens, &["auth_mode", "authMode"]))
+        .map(str::to_ascii_lowercase);
+    let has_api_key = pick_nonempty_string(
+        value,
+        &["OPENAI_API_KEY", "openai_api_key", "api_key", "apiKey"],
+    )
+    .or_else(|| {
+        pick_nonempty_string(
+            tokens,
+            &["OPENAI_API_KEY", "openai_api_key", "api_key", "apiKey"],
+        )
+    })
+    .is_some();
+    // Match Codex AuthDotJson::resolved_mode: an explicit mode wins over
+    // legacy credential fields, then an API key is the fallback for old files.
+    match auth_mode.as_deref() {
+        Some("apikey" | "api_key" | "api-key") => {
+            if has_api_key {
+                Ok(LocalAuth::ApiKey)
+            } else {
+                Err(AuthFailure::signed_out(
+                    "Codex API-key login is incomplete. Please sign in again.",
+                ))
+            }
+        }
+        Some("chatgpt" | "chatgptauthtokens" | "chatgpt_auth_tokens") => chatgpt_auth(),
+        Some(_) => Err(AuthFailure::unavailable("Codex login format has changed.")),
+        None if has_api_key => Ok(LocalAuth::ApiKey),
+        None => chatgpt_auth(),
+    }
+}
+
+fn load_auth() -> Result<LocalAuth, AuthFailure> {
     let path = auth_path().ok_or_else(|| {
         AuthFailure::unavailable("Codex login location is temporarily unavailable.")
     })?;
@@ -98,17 +159,7 @@ fn load_auth() -> Result<Auth, AuthFailure> {
         .map_err(|_| AuthFailure::unavailable("Codex login data is temporarily unavailable."))?;
     let value: Value = serde_json::from_str(&raw)
         .map_err(|_| AuthFailure::unavailable("Codex login format has changed."))?;
-    let tokens = value.get("tokens").unwrap_or(&value);
-    let access_token = pick_string(tokens, &["access_token", "accessToken"])
-        .ok_or_else(|| AuthFailure::signed_out("Codex login expired. Please sign in again."))?
-        .to_owned();
-    let account_id = pick_string(tokens, &["account_id", "accountId"])
-        .map(str::to_owned)
-        .or_else(|| account_id_from_jwt(&access_token));
-    Ok(Auth {
-        access_token,
-        account_id,
-    })
+    parse_local_auth(&value)
 }
 
 fn headers(auth: &Auth) -> Result<HeaderMap, &'static str> {
@@ -197,7 +248,8 @@ fn parse_official_usage(value: &Value) -> Result<crate::usage_stats::OfficialUsa
 pub async fn fetch_official_usage(client: &reqwest::Client) -> crate::usage_stats::OfficialUsage {
     use crate::usage_stats::OfficialUsage;
     let auth = match load_auth() {
-        Ok(auth) => auth,
+        Ok(LocalAuth::Chatgpt(auth)) => auth,
+        Ok(LocalAuth::ApiKey) => return OfficialUsage::unavailable("not_applicable"),
         Err(error) => return OfficialUsage::unavailable(error.status),
     };
     let Ok(headers) = headers(&auth) else {
@@ -530,14 +582,305 @@ async fn limited_json(mut response: reqwest::Response) -> Result<Value, ()> {
     serde_json::from_slice(&bytes).map_err(|_| ())
 }
 
+fn admin_headers(admin_key: &str) -> Result<HeaderMap, &'static str> {
+    let mut result = HeaderMap::new();
+    let mut bearer = HeaderValue::from_str(&format!("Bearer {admin_key}"))
+        .map_err(|_| "The OpenAI Admin API key is invalid.")?;
+    bearer.set_sensitive(true);
+    result.insert(AUTHORIZATION, bearer);
+    result.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    Ok(result)
+}
+
+fn admin_http_failure(status: reqwest::StatusCode) -> &'static str {
+    match status.as_u16() {
+        401 | 403 => "The OpenAI Admin API key was rejected.",
+        429 => "The OpenAI organization usage API is rate limited.",
+        _ => "The OpenAI organization usage API is temporarily unavailable.",
+    }
+}
+
+async fn fetch_admin_pages(
+    client: &reqwest::Client,
+    url: &str,
+    admin_key: &str,
+    start_time: i64,
+    end_time: i64,
+) -> Result<Vec<Value>, &'static str> {
+    let headers = admin_headers(admin_key)?;
+    let mut pages = Vec::new();
+    let mut page: Option<String> = None;
+    for _ in 0..MAX_ADMIN_PAGES {
+        let mut query = vec![
+            ("start_time", start_time.to_string()),
+            ("end_time", end_time.to_string()),
+            ("bucket_width", "1d".to_string()),
+            ("limit", "31".to_string()),
+        ];
+        if let Some(value) = &page {
+            query.push(("page", value.clone()));
+        }
+        let response = client
+            .get(url)
+            .headers(headers.clone())
+            .query(&query)
+            .send()
+            .await
+            .map_err(|_| "Network unavailable while reading OpenAI organization usage.")?;
+        if !response.status().is_success() {
+            return Err(admin_http_failure(response.status()));
+        }
+        let value = limited_json(response)
+            .await
+            .map_err(|_| "The OpenAI organization usage response format has changed.")?;
+        let has_more = value
+            .get("has_more")
+            .or_else(|| value.get("hasMore"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_page = pick_nonempty_string(&value, &["next_page", "nextPage"]).map(str::to_owned);
+        pages.push(value);
+        if !has_more {
+            return Ok(pages);
+        }
+        page = Some(next_page.ok_or("The OpenAI organization usage response format has changed.")?);
+    }
+    Err("The OpenAI organization usage response exceeded the safe page limit.")
+}
+
+#[derive(Clone, Copy, Default)]
+struct UsageTotals {
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    requests: u64,
+}
+
+impl UsageTotals {
+    fn add(&mut self, other: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.requests = self.requests.saturating_add(other.requests);
+    }
+
+    fn apply(self, period: &mut ApiUsagePeriod) {
+        period.input_tokens = Some(self.input_tokens);
+        period.cached_input_tokens = Some(self.cached_input_tokens);
+        period.output_tokens = Some(self.output_tokens);
+        period.requests = Some(self.requests);
+    }
+}
+
+fn has_any_key(value: &Value, keys: &[&str]) -> bool {
+    keys.iter().any(|key| value.get(*key).is_some())
+}
+
+fn parse_admin_usage_pages(
+    pages: &[Value],
+    today_start: i64,
+) -> Result<(UsageTotals, UsageTotals), ()> {
+    const INPUT_KEYS: [&str; 2] = ["input_tokens", "inputTokens"];
+    const CACHED_KEYS: [&str; 4] = [
+        "input_cached_tokens",
+        "inputCachedTokens",
+        "cached_input_tokens",
+        "cachedInputTokens",
+    ];
+    const OUTPUT_KEYS: [&str; 2] = ["output_tokens", "outputTokens"];
+    const REQUEST_KEYS: [&str; 3] = ["num_model_requests", "numModelRequests", "requests"];
+    let mut today = UsageTotals::default();
+    let mut month = UsageTotals::default();
+    for page in pages {
+        let buckets = page.get("data").and_then(Value::as_array).ok_or(())?;
+        for bucket in buckets {
+            let start_time = integer(bucket, &["start_time", "startTime"])
+                .and_then(|value| i64::try_from(value).ok())
+                .ok_or(())?;
+            let results = bucket.get("results").and_then(Value::as_array).ok_or(())?;
+            for result in results {
+                let recognized = has_any_key(result, &INPUT_KEYS)
+                    || has_any_key(result, &CACHED_KEYS)
+                    || has_any_key(result, &OUTPUT_KEYS)
+                    || has_any_key(result, &REQUEST_KEYS);
+                if !recognized {
+                    return Err(());
+                }
+                let totals = UsageTotals {
+                    input_tokens: integer(result, &INPUT_KEYS).unwrap_or(0),
+                    cached_input_tokens: integer(result, &CACHED_KEYS).unwrap_or(0),
+                    output_tokens: integer(result, &OUTPUT_KEYS).unwrap_or(0),
+                    requests: integer(result, &REQUEST_KEYS).unwrap_or(0),
+                };
+                month.add(totals);
+                if start_time >= today_start {
+                    today.add(totals);
+                }
+            }
+        }
+    }
+    Ok((today, month))
+}
+
+fn finite_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())
+        .filter(|number| number.is_finite() && *number >= 0.0)
+}
+
+fn parse_admin_cost_pages(pages: &[Value], today_start: i64) -> Result<(f64, f64), ()> {
+    let mut today = 0.0;
+    let mut month = 0.0;
+    for page in pages {
+        let buckets = page.get("data").and_then(Value::as_array).ok_or(())?;
+        for bucket in buckets {
+            let start_time = integer(bucket, &["start_time", "startTime"])
+                .and_then(|value| i64::try_from(value).ok())
+                .ok_or(())?;
+            let results = bucket.get("results").and_then(Value::as_array).ok_or(())?;
+            for result in results {
+                let amount = result.get("amount").ok_or(())?;
+                let currency = pick_nonempty_string(amount, &["currency"])
+                    .unwrap_or("usd")
+                    .to_ascii_lowercase();
+                if currency != "usd" {
+                    return Err(());
+                }
+                let value = amount.get("value").and_then(finite_number).ok_or(())?;
+                month += value;
+                if start_time >= today_start {
+                    today += value;
+                }
+            }
+        }
+    }
+    if !today.is_finite() || !month.is_finite() {
+        return Err(());
+    }
+    Ok((today, month))
+}
+
+async fn fetch_api_usage(client: &reqwest::Client) -> ApiUsageSummary {
+    let Some(admin_key) = std::env::var("OPENAI_ADMIN_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return ApiUsageSummary::not_configured();
+    };
+    let now = Utc::now();
+    let Some(month_start) = Utc
+        .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+        .single()
+    else {
+        return ApiUsageSummary {
+            status: ApiUsageStatus::Unavailable,
+            today: ApiUsagePeriod::default(),
+            month_to_date: ApiUsagePeriod::default(),
+            updated_at: now.to_rfc3339(),
+            message: Some("The current billing period could not be calculated.".into()),
+        };
+    };
+    let Some(today_start) = Utc
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+        .single()
+    else {
+        return ApiUsageSummary {
+            status: ApiUsageStatus::Unavailable,
+            today: ApiUsagePeriod::default(),
+            month_to_date: ApiUsagePeriod::default(),
+            updated_at: now.to_rfc3339(),
+            message: Some("The current usage day could not be calculated.".into()),
+        };
+    };
+    let (usage_pages, cost_pages) = tokio::join!(
+        fetch_admin_pages(
+            client,
+            ADMIN_USAGE_URL,
+            &admin_key,
+            month_start.timestamp(),
+            now.timestamp(),
+        ),
+        fetch_admin_pages(
+            client,
+            ADMIN_COSTS_URL,
+            &admin_key,
+            month_start.timestamp(),
+            now.timestamp(),
+        ),
+    );
+    let usage = usage_pages.and_then(|pages| {
+        parse_admin_usage_pages(&pages, today_start.timestamp())
+            .map_err(|_| "The OpenAI organization usage response format has changed.")
+    });
+    let costs = cost_pages.and_then(|pages| {
+        parse_admin_cost_pages(&pages, today_start.timestamp())
+            .map_err(|_| "The OpenAI organization costs response format has changed.")
+    });
+
+    let mut today = ApiUsagePeriod::default();
+    let mut month_to_date = ApiUsagePeriod::default();
+    if let Ok((today_usage, month_usage)) = usage {
+        today_usage.apply(&mut today);
+        month_usage.apply(&mut month_to_date);
+    }
+    if let Ok((today_cost, month_cost)) = costs {
+        today.cost_usd = Some(today_cost);
+        month_to_date.cost_usd = Some(month_cost);
+    }
+    let (status, message) = match (usage, costs) {
+        (Ok(_), Ok(_)) => (ApiUsageStatus::Ok, None),
+        (Err(error), Ok(_)) => (ApiUsageStatus::Partial, Some(error.to_string())),
+        (Ok(_), Err(error)) => (ApiUsageStatus::Partial, Some(error.to_string())),
+        (Err(left), Err(right)) => {
+            let message = if left == right {
+                left.to_string()
+            } else {
+                "OpenAI organization usage and cost data are temporarily unavailable.".into()
+            };
+            (ApiUsageStatus::Unavailable, Some(message))
+        }
+    };
+    ApiUsageSummary {
+        status,
+        today,
+        month_to_date,
+        updated_at: now.to_rfc3339(),
+        message,
+    }
+}
+
+fn api_key_snapshot(api_usage: ApiUsageSummary) -> ProviderSnapshot {
+    let unavailable = api_usage.status == ApiUsageStatus::Unavailable;
+    ProviderSnapshot {
+        provider: "codex".into(),
+        display_name: "CODEX".into(),
+        auth_mode: AuthMode::ApiKey,
+        plan: Some("API".into()),
+        short_window: None,
+        weekly_window: None,
+        reset_credits: None,
+        reset_credit_expires_at: Vec::new(),
+        updated_at: api_usage.updated_at.clone(),
+        status: if unavailable { "unavailable" } else { "ok" }.into(),
+        message: api_usage.message.clone(),
+        api_usage: Some(api_usage),
+    }
+}
+
 pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
     let auth = match load_auth() {
-        Ok(value) => value,
+        Ok(LocalAuth::ApiKey) => return api_key_snapshot(fetch_api_usage(client).await),
+        Ok(LocalAuth::Chatgpt(value)) => value,
         Err(failure) => return ProviderSnapshot::failure(failure.status, failure.message),
     };
     let request_headers = match headers(&auth) {
         Ok(value) => value,
-        Err(message) => return ProviderSnapshot::failure("signed_out", message),
+        Err(message) => {
+            return ProviderSnapshot::failure_for(AuthMode::Chatgpt, "signed_out", message)
+        }
     };
 
     let (usage_result, credits_result) = tokio::join!(
@@ -552,10 +895,11 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
         Ok(response) if response.status().is_success() => response,
         Ok(response) => {
             let (status, message) = safe_http_failure(response.status());
-            return ProviderSnapshot::failure(status, message);
+            return ProviderSnapshot::failure_for(AuthMode::Chatgpt, status, message);
         }
         Err(_) => {
-            return ProviderSnapshot::failure(
+            return ProviderSnapshot::failure_for(
+                AuthMode::Chatgpt,
                 "unavailable",
                 "Network unavailable. It will retry automatically.",
             )
@@ -564,7 +908,11 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
     let usage: Value = match limited_json(usage_response).await {
         Ok(value) => value,
         Err(_) => {
-            return ProviderSnapshot::failure("unavailable", "Quota response format has changed.")
+            return ProviderSnapshot::failure_for(
+                AuthMode::Chatgpt,
+                "unavailable",
+                "Quota response format has changed.",
+            )
         }
     };
     let rate_limit = usage
@@ -573,7 +921,8 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
         .unwrap_or(&usage);
     let (short_window, weekly_window) = parse_usage_windows(rate_limit);
     if short_window.is_none() && weekly_window.is_none() {
-        return ProviderSnapshot::failure(
+        return ProviderSnapshot::failure_for(
+            AuthMode::Chatgpt,
             "unavailable",
             "Quota response does not contain a supported usage window.",
         );
@@ -629,6 +978,7 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
     ProviderSnapshot {
         provider: "codex".into(),
         display_name: "CODEX".into(),
+        auth_mode: AuthMode::Chatgpt,
         plan: pick_string(&usage, &["plan_type", "planType"]).map(|value| value.to_uppercase()),
         short_window,
         weekly_window,
@@ -637,6 +987,7 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
         updated_at: chrono::Utc::now().to_rfc3339(),
         status: "ok".into(),
         message: None,
+        api_usage: None,
     }
 }
 
@@ -716,6 +1067,61 @@ mod tests {
         assert!(stats.total_tokens.is_some());
     }
 
+    #[test]
+    fn explicit_chatgpt_mode_ignores_a_stale_api_key_field() {
+        let value = serde_json::json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": "mock-standard-key",
+            "tokens": {
+                "access_token": "mock.chatgpt.token",
+                "account_id": "mock-account"
+            }
+        });
+        let LocalAuth::Chatgpt(auth) = parse_local_auth(&value).unwrap() else {
+            panic!("the explicit ChatGPT mode must match Codex resolved_mode");
+        };
+        assert_eq!(auth.account_id.as_deref(), Some("mock-account"));
+    }
+
+    #[test]
+    fn explicit_api_mode_ignores_stale_chatgpt_tokens() {
+        let value = serde_json::json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "mock-standard-key",
+            "tokens": {
+                "access_token": "mock.chatgpt.token",
+                "account_id": "mock-account"
+            }
+        });
+        assert!(matches!(parse_local_auth(&value), Ok(LocalAuth::ApiKey)));
+    }
+
+    #[test]
+    fn detects_api_key_auth_without_exposing_the_key() {
+        for value in [
+            serde_json::json!({"OPENAI_API_KEY": "mock-standard-key"}),
+            serde_json::json!({"auth_mode": "apikey", "OPENAI_API_KEY": "mock-standard-key"}),
+            serde_json::json!({"authMode": "api-key", "OPENAI_API_KEY": "mock-standard-key"}),
+            serde_json::json!({"tokens": {"apiKey": "mock-standard-key"}}),
+        ] {
+            assert!(matches!(parse_local_auth(&value), Ok(LocalAuth::ApiKey)));
+        }
+    }
+
+    #[test]
+    fn empty_api_key_does_not_create_a_false_api_session() {
+        let value = serde_json::json!({"OPENAI_API_KEY": "  "});
+        let failure = parse_local_auth(&value).err().unwrap();
+        assert_eq!(failure.status, "signed_out");
+    }
+
+    #[test]
+    fn explicit_api_mode_requires_a_real_key_marker() {
+        let failure = parse_local_auth(&serde_json::json!({"auth_mode": "apikey"}))
+            .err()
+            .unwrap();
+        assert_eq!(failure.status, "signed_out");
+    }
 
     #[test]
     fn distinguishes_missing_login_from_transient_auth_io_failures() {
@@ -860,6 +1266,79 @@ mod tests {
                 "2026-07-16T12:00:00Z".to_string(),
                 "2026-07-17T12:00:00Z".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn parses_mock_organization_usage_without_estimating_missing_fields() {
+        let pages = vec![serde_json::json!({
+            "data": [
+                {
+                    "start_time": 100,
+                    "results": [{
+                        "input_tokens": 1200,
+                        "input_cached_tokens": 400,
+                        "output_tokens": 300,
+                        "num_model_requests": 5
+                    }]
+                },
+                {
+                    "start_time": 200,
+                    "results": [{
+                        "input_tokens": 800,
+                        "input_cached_tokens": 200,
+                        "output_tokens": 100,
+                        "num_model_requests": 2
+                    }]
+                }
+            ],
+            "has_more": false
+        })];
+        let (today, month) = parse_admin_usage_pages(&pages, 200).unwrap();
+        assert_eq!(today.input_tokens, 800);
+        assert_eq!(today.requests, 2);
+        assert_eq!(month.input_tokens, 2000);
+        assert_eq!(month.cached_input_tokens, 600);
+        assert_eq!(month.output_tokens, 400);
+        assert_eq!(month.requests, 7);
+    }
+
+    #[test]
+    fn rejects_mock_usage_results_with_an_unknown_shape() {
+        let pages = vec![serde_json::json!({
+            "data": [{"start_time": 200, "results": [{"tokens": 999}]}]
+        })];
+        assert!(parse_admin_usage_pages(&pages, 200).is_err());
+    }
+
+    #[test]
+    fn parses_mock_usd_costs_and_rejects_other_currencies() {
+        let pages = vec![serde_json::json!({
+            "data": [
+                {"start_time": 100, "results": [{"amount": {"value": 1.25, "currency": "usd"}}]},
+                {"start_time": 200, "results": [{"amount": {"value": "0.50", "currency": "usd"}}]}
+            ]
+        })];
+        let (today, month) = parse_admin_cost_pages(&pages, 200).unwrap();
+        assert_eq!(today, 0.5);
+        assert_eq!(month, 1.75);
+
+        let other_currency = vec![serde_json::json!({
+            "data": [{"start_time": 200, "results": [{"amount": {"value": 1, "currency": "eur"}}]}]
+        })];
+        assert!(parse_admin_cost_pages(&other_currency, 200).is_err());
+    }
+
+    #[test]
+    fn api_key_snapshot_is_healthy_without_optional_admin_monitoring() {
+        let snapshot = api_key_snapshot(ApiUsageSummary::not_configured());
+        assert_eq!(snapshot.auth_mode, AuthMode::ApiKey);
+        assert_eq!(snapshot.status, "ok");
+        assert!(snapshot.short_window.is_none());
+        assert!(snapshot.weekly_window.is_none());
+        assert_eq!(
+            snapshot.api_usage.unwrap().status,
+            ApiUsageStatus::NotConfigured
         );
     }
 }

@@ -12,11 +12,76 @@ pub struct UsageWindow {
     pub window_seconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    Chatgpt,
+    ApiKey,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiUsageStatus {
+    NotConfigured,
+    Ok,
+    Partial,
+    Stale,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiUsagePeriod {
+    pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub requests: Option<u64>,
+    pub cost_usd: Option<f64>,
+}
+
+impl ApiUsagePeriod {
+    pub fn has_values(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.cached_input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.requests.is_some()
+            || self.cost_usd.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiUsageSummary {
+    pub status: ApiUsageStatus,
+    pub today: ApiUsagePeriod,
+    pub month_to_date: ApiUsagePeriod,
+    pub updated_at: String,
+    pub message: Option<String>,
+}
+
+impl ApiUsageSummary {
+    pub fn not_configured() -> Self {
+        Self {
+            status: ApiUsageStatus::NotConfigured,
+            today: ApiUsagePeriod::default(),
+            month_to_date: ApiUsagePeriod::default(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            message: None,
+        }
+    }
+
+    pub fn has_values(&self) -> bool {
+        self.today.has_values() || self.month_to_date.has_values()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSnapshot {
     pub provider: String,
     pub display_name: String,
+    pub auth_mode: AuthMode,
     pub plan: Option<String>,
     pub short_window: Option<UsageWindow>,
     pub weekly_window: Option<UsageWindow>,
@@ -25,13 +90,19 @@ pub struct ProviderSnapshot {
     pub updated_at: String,
     pub status: String,
     pub message: Option<String>,
+    pub api_usage: Option<ApiUsageSummary>,
 }
 
 impl ProviderSnapshot {
     pub fn failure(status: &str, message: &str) -> Self {
+        Self::failure_for(AuthMode::Unknown, status, message)
+    }
+
+    pub fn failure_for(auth_mode: AuthMode, status: &str, message: &str) -> Self {
         Self {
             provider: "codex".into(),
             display_name: "CODEX".into(),
+            auth_mode,
             plan: None,
             short_window: None,
             weekly_window: None,
@@ -40,6 +111,7 @@ impl ProviderSnapshot {
             updated_at: chrono::Utc::now().to_rfc3339(),
             status: status.into(),
             message: Some(message.into()),
+            api_usage: None,
         }
     }
 }

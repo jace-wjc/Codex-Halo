@@ -249,4 +249,41 @@ describe("MenuPanel", () => {
     expect(screen.getByText("请输入 10 秒到 24 小时之间的时间")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
   });
+
+  it("uses API-specific labels without changing the shared desktop controls", () => {
+    render(
+      <MenuPanel
+        snapshot={{
+          ...snapshot,
+          authMode: "api_key",
+          plan: "API",
+          shortWindow: null,
+          weeklyWindow: null,
+          apiUsage: {
+            status: "not_configured",
+            today: { inputTokens: null, cachedInputTokens: null, outputTokens: null, requests: null, costUsd: null },
+            monthToDate: { inputTokens: null, cachedInputTokens: null, outputTokens: null, requests: null, costUsd: null },
+            updatedAt: "2026-07-15T00:00:00Z",
+            message: null,
+          },
+        }}
+        preferences={{ ...preferences, language: "en" }}
+        widgetVisible
+        autostartEnabled={false}
+        refreshing={false}
+        onRefresh={() => {}}
+        onToggleWidget={() => {}}
+        onToggleAlwaysOnTop={() => {}}
+        onToggleAutostart={() => {}}
+        onToggleLanguage={() => {}}
+        onToggleClickThrough={() => {}}
+        onQuit={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText("API · Usage based").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "API usage" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /API usage auto-refresh/ })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /Always on top/ })).toBeInTheDocument();
+  });
 });

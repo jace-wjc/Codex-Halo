@@ -1,5 +1,7 @@
 export type ProviderId = "codex" | "claude";
 export type SnapshotStatus = "ok" | "stale" | "loading" | "unavailable" | "signed_out";
+export type AuthMode = "chatgpt" | "api_key" | "unknown";
+export type ApiUsageStatus = "not_configured" | "ok" | "partial" | "stale" | "unavailable";
 export type Language = "zh-CN" | "en";
 export type QuotaTier = "unknown" | "healthy" | "caution" | "critical";
 export type DesktopView = "widget" | "panel";
@@ -10,9 +12,27 @@ export interface UsageWindow {
   windowSeconds: number;
 }
 
+export interface ApiUsagePeriod {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+  requests: number | null;
+  costUsd: number | null;
+}
+
+export interface ApiUsageSummary {
+  status: ApiUsageStatus;
+  today: ApiUsagePeriod;
+  monthToDate: ApiUsagePeriod;
+  updatedAt: string;
+  message: string | null;
+}
+
 export interface ProviderSnapshot {
   provider: ProviderId;
   displayName: string;
+  /** Optional for compatibility with native builds older than v0.2.2. */
+  authMode?: AuthMode;
   plan: string | null;
   shortWindow: UsageWindow | null;
   weeklyWindow: UsageWindow | null;
@@ -21,6 +41,7 @@ export interface ProviderSnapshot {
   updatedAt: string;
   status: SnapshotStatus;
   message: string | null;
+  apiUsage?: ApiUsageSummary | null;
 }
 
 export interface WidgetPreferences {

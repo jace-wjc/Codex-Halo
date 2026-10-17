@@ -56,8 +56,8 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "Codex quota at a glance",
-    "longDescription": "A lightweight floating desktop card for Codex usage limits.",
+    "shortDescription": "Codex quota and API usage at a glance",
+    "longDescription": "A lightweight floating desktop monitor for Codex quota, API usage mode, and local token activity.",
     "copyright": "Copyright Codex Halo contributors",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
   }

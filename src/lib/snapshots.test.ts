@@ -51,4 +51,39 @@ describe("snapshot failure handling", () => {
     expect(value.weeklyWindow).toBeNull();
     expect(value.resetCredits).toBeNull();
   });
+
+  it("keeps real API totals as explicitly stale after a transient Admin API failure", () => {
+    const apiSuccess: ProviderSnapshot = {
+      ...success,
+      authMode: "api_key",
+      plan: "API",
+      shortWindow: null,
+      weeklyWindow: null,
+      resetCredits: null,
+      apiUsage: {
+        status: "ok",
+        today: { inputTokens: 100, cachedInputTokens: 20, outputTokens: 10, requests: 1, costUsd: 0.1 },
+        monthToDate: { inputTokens: 1000, cachedInputTokens: 200, outputTokens: 100, requests: 10, costUsd: 1.5 },
+        updatedAt: success.updatedAt,
+        message: null,
+      },
+    };
+    const failure: ProviderSnapshot = {
+      ...apiSuccess,
+      status: "unavailable",
+      message: "Organization API unavailable",
+      apiUsage: {
+        status: "unavailable",
+        today: { inputTokens: null, cachedInputTokens: null, outputTokens: null, requests: null, costUsd: null },
+        monthToDate: { inputTokens: null, cachedInputTokens: null, outputTokens: null, requests: null, costUsd: null },
+        updatedAt: "2026-07-07T01:00:00Z",
+        message: "Organization API unavailable",
+      },
+    };
+
+    const merged = mergeSnapshots([apiSuccess], [failure])[0];
+    expect(merged.status).toBe("stale");
+    expect(merged.apiUsage?.status).toBe("stale");
+    expect(merged.apiUsage?.monthToDate.costUsd).toBe(1.5);
+  });
 });

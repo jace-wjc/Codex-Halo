@@ -13,7 +13,7 @@ use std::{
 
 use geometry::{GeometryController, WorkAreaPayload};
 use models::{
-    DesktopState, ProviderSnapshot, SnapshotState, WidgetPreferences,
+    ApiUsageStatus, AuthMode, DesktopState, ProviderSnapshot, SnapshotState, WidgetPreferences,
     MAX_QUOTA_REFRESH_INTERVAL_SECONDS, MIN_QUOTA_REFRESH_INTERVAL_SECONDS,
 };
 use tauri::{
@@ -180,18 +180,43 @@ fn merge_snapshots(
             }
             let previous = current.iter().find(|item| {
                 item.provider == next.provider
-                    && (item.short_window.is_some() || item.weekly_window.is_some())
+                    && (next.auth_mode == AuthMode::Unknown || item.auth_mode == next.auth_mode)
+                    && (item.short_window.is_some()
+                        || item.weekly_window.is_some()
+                        || item
+                            .api_usage
+                            .as_ref()
+                            .is_some_and(|usage| usage.has_values()))
             });
             if let Some(previous) = previous {
+                let api_failure_message = next
+                    .api_usage
+                    .as_ref()
+                    .and_then(|usage| usage.message.clone())
+                    .or_else(|| next.message.clone());
                 let mut stale = previous.clone();
                 stale.status = "stale".into();
                 stale.message = next.message;
+                if let Some(api_usage) = stale.api_usage.as_mut() {
+                    api_usage.status = ApiUsageStatus::Stale;
+                    api_usage.message = api_failure_message;
+                }
                 stale
             } else {
                 next
             }
         })
         .collect()
+}
+
+fn snapshot_refresh_succeeded(snapshot: &ProviderSnapshot) -> bool {
+    snapshot.status == "ok"
+        && !snapshot.api_usage.as_ref().is_some_and(|usage| {
+            matches!(
+                usage.status,
+                ApiUsageStatus::Partial | ApiUsageStatus::Unavailable
+            )
+        })
 }
 
 fn is_near_reset(snapshots: &[ProviderSnapshot], now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -293,6 +318,28 @@ fn rounded_percent(value: f64) -> i64 {
     value.clamp(0.0, 100.0).round() as i64
 }
 
+fn compact_count(value: u64) -> String {
+    if value >= 1_000_000_000 {
+        format!("{:.1}B", value as f64 / 1_000_000_000.0)
+    } else if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn compact_cost(value: f64) -> String {
+    if value >= 1_000_000.0 {
+        format!("${:.1}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("${:.1}K", value / 1_000.0)
+    } else {
+        format!("${value:.2}")
+    }
+}
+
 fn stale_values_expired(snapshot: &ProviderSnapshot, now: chrono::DateTime<chrono::Utc>) -> bool {
     if snapshot.status != "stale" {
         return false;
@@ -319,6 +366,37 @@ fn tray_summary(snapshot_state: &SnapshotState) -> String {
         };
     };
     let hide_values = stale_values_expired(snapshot, chrono::Utc::now());
+    if snapshot.auth_mode == AuthMode::ApiKey {
+        let value = if hide_values {
+            "API —".into()
+        } else if let Some(cost) = snapshot
+            .api_usage
+            .as_ref()
+            .and_then(|usage| usage.month_to_date.cost_usd)
+        {
+            format!("API {}", compact_cost(cost))
+        } else if let Some(tokens) = snapshot.api_usage.as_ref().and_then(|usage| {
+            let period = &usage.month_to_date;
+            match (period.input_tokens, period.output_tokens) {
+                (Some(input), Some(output)) => Some(input.saturating_add(output)),
+                (Some(input), None) => Some(input),
+                (None, Some(output)) => Some(output),
+                (None, None) => None,
+            }
+        }) {
+            format!("API {} tok", compact_count(tokens))
+        } else if snapshot.status == "unavailable" {
+            "API —".into()
+        } else {
+            "API".into()
+        };
+        let suffix = if snapshot.status == "stale" && !hide_values {
+            " ⚠︎"
+        } else {
+            ""
+        };
+        return format!("{value}{suffix}");
+    }
     let mut windows = Vec::with_capacity(2);
     if let Some(window) = &snapshot.short_window {
         let value = if hide_values {
@@ -389,8 +467,26 @@ fn tray_tooltip(snapshot_state: &SnapshotState) -> String {
         .snapshots
         .iter()
         .any(|snapshot| stale_values_expired(snapshot, chrono::Utc::now()));
+    let api_snapshot = snapshot_state
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.auth_mode == AuthMode::ApiKey);
     let state = if snapshot_state.refreshing {
         "refreshing"
+    } else if api_snapshot.is_some_and(|snapshot| {
+        snapshot
+            .api_usage
+            .as_ref()
+            .is_some_and(|usage| usage.status == ApiUsageStatus::NotConfigured)
+    }) {
+        "API usage based; organization totals not configured"
+    } else if api_snapshot.is_some_and(|snapshot| {
+        snapshot
+            .api_usage
+            .as_ref()
+            .is_some_and(|usage| usage.status == ApiUsageStatus::Partial)
+    }) {
+        "partial organization usage"
     } else if stale_expired {
         "last known data expired"
     } else if snapshot_state
@@ -475,7 +571,7 @@ async fn refresh_quota(
     publish_snapshot_state(&app, state);
 
     let incoming = vec![codex::fetch_snapshot(&state.client).await];
-    let success = incoming.iter().all(|snapshot| snapshot.status == "ok");
+    let success = incoming.iter().all(snapshot_refresh_succeeded);
     let now_wall = chrono::Utc::now();
     let now_instant = Instant::now();
     let configured_interval = configured_refresh_interval(state);
@@ -1374,6 +1470,7 @@ mod tests {
         ProviderSnapshot {
             provider: "codex".into(),
             display_name: "CODEX".into(),
+            auth_mode: AuthMode::Chatgpt,
             plan: Some("PRO".into()),
             short_window: short.map(|remaining_percent| models::UsageWindow {
                 remaining_percent,
@@ -1390,6 +1487,38 @@ mod tests {
             updated_at: "2026-07-14T00:00:00Z".into(),
             status: status.into(),
             message: None,
+            api_usage: None,
+        }
+    }
+
+    fn api_snapshot(status: ApiUsageStatus, cost_usd: Option<f64>) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider: "codex".into(),
+            display_name: "CODEX".into(),
+            auth_mode: AuthMode::ApiKey,
+            plan: Some("API".into()),
+            short_window: None,
+            weekly_window: None,
+            reset_credits: None,
+            reset_credit_expires_at: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            status: if status == ApiUsageStatus::Unavailable {
+                "unavailable"
+            } else {
+                "ok"
+            }
+            .into(),
+            message: None,
+            api_usage: Some(models::ApiUsageSummary {
+                status,
+                today: models::ApiUsagePeriod::default(),
+                month_to_date: models::ApiUsagePeriod {
+                    cost_usd,
+                    ..models::ApiUsagePeriod::default()
+                },
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                message: None,
+            }),
         }
     }
 
@@ -1426,6 +1555,42 @@ mod tests {
         let result = merge_snapshots(&[previous], vec![snapshot("signed_out", None, None)]);
         assert_eq!(result[0].status, "signed_out");
         assert!(result[0].short_window.is_none());
+    }
+
+    #[test]
+    fn transient_admin_failure_keeps_known_api_totals_as_stale() {
+        let previous = api_snapshot(ApiUsageStatus::Ok, Some(12.34));
+        let mut failure = api_snapshot(ApiUsageStatus::Unavailable, None);
+        failure.message = Some("Organization usage unavailable".into());
+        failure.api_usage.as_mut().unwrap().message = failure.message.clone();
+
+        let result = merge_snapshots(&[previous], vec![failure]);
+
+        assert_eq!(result[0].status, "stale");
+        assert_eq!(
+            result[0].api_usage.as_ref().unwrap().status,
+            ApiUsageStatus::Stale
+        );
+        assert_eq!(
+            result[0].api_usage.as_ref().unwrap().month_to_date.cost_usd,
+            Some(12.34)
+        );
+    }
+
+    #[test]
+    fn partial_admin_results_use_failure_backoff_without_hiding_real_values() {
+        let partial = api_snapshot(ApiUsageStatus::Partial, Some(4.2));
+        assert_eq!(partial.status, "ok");
+        assert!(!snapshot_refresh_succeeded(&partial));
+        assert!(snapshot_refresh_succeeded(&api_snapshot(
+            ApiUsageStatus::NotConfigured,
+            None,
+        )));
+        assert!(snapshot_refresh_succeeded(&snapshot(
+            "ok",
+            Some(74.0),
+            Some(42.0),
+        )));
     }
 
     #[test]
@@ -1558,6 +1723,29 @@ mod tests {
             ..weekly_only
         };
         assert_eq!(tray_summary(&short_only), "5h 74%");
+    }
+
+    #[test]
+    fn menu_bar_reports_api_cost_without_calling_it_balance() {
+        let state = SnapshotState {
+            snapshots: vec![api_snapshot(ApiUsageStatus::Ok, Some(12.345))],
+            refreshing: false,
+            revision: 1,
+            last_attempt_at: None,
+            last_success_at: None,
+            next_refresh_at: None,
+        };
+        assert_eq!(tray_summary(&state), "API $12.35");
+        assert!(!tray_tooltip(&state)
+            .to_ascii_lowercase()
+            .contains("balance"));
+
+        let basic = SnapshotState {
+            snapshots: vec![api_snapshot(ApiUsageStatus::NotConfigured, None)],
+            ..state
+        };
+        assert_eq!(tray_summary(&basic), "API");
+        assert!(tray_tooltip(&basic).contains("organization totals not configured"));
     }
 
     #[test]

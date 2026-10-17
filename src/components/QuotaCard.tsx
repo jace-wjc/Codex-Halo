@@ -4,6 +4,7 @@ import {
   ArrowUp,
   ClockCounterClockwise,
   CloudSlash,
+  Key,
   PushPin,
   PushPinSlash,
   SignIn,
@@ -37,6 +38,11 @@ interface Props {
 
 function tierLabel(snapshot: ProviderSnapshot, language: Language): string {
   const t = copy[normalizeLanguage(language)];
+  if (snapshot.authMode === "api_key") {
+    if (snapshot.status === "unavailable") return t.apiUsageUnavailable;
+    if (snapshot.status === "stale") return t.dataStale;
+    return t.apiUsageBased;
+  }
   if (snapshot.status === "loading") return t.loadingQuota;
   if (snapshot.status === "signed_out") return t.notSignedIn;
   if (snapshot.status === "unavailable") return t.unavailableStatus;
@@ -50,6 +56,7 @@ function tierLabel(snapshot: ProviderSnapshot, language: Language): string {
 }
 
 function OrbStateIcon({ snapshot }: { snapshot: ProviderSnapshot }) {
+  if (snapshot.authMode === "api_key") return <Key />;
   if (snapshot.status === "loading") return <SpinnerGap className="is-spinning" />;
   if (snapshot.status === "signed_out") return <SignIn />;
   if (snapshot.status === "stale") return <ClockCounterClockwise />;
@@ -94,7 +101,7 @@ export const QuotaCard = memo(function QuotaCard({
         <nav className="card-actions" aria-label={t.controls} onMouseDown={(event) => event.stopPropagation()}>
           {providerCount > 1 && onPrevious ? <button type="button" onClick={onPrevious} aria-label={t.servicePrevious}><ArrowUp /></button> : null}
           {providerCount > 1 && onNext ? <button type="button" onClick={onNext} aria-label={t.serviceNext}><ArrowDown /></button> : null}
-          <span className={`status-pill status-pill--${snapshot.status} status-pill--${tier}${isConsuming ? " status-pill--active" : ""}`} title={statusLabel}>
+          <span className={`status-pill status-pill--${snapshot.status} status-pill--${tier}${snapshot.authMode === "api_key" ? " status-pill--api" : ""}${isConsuming ? " status-pill--active" : ""}`} title={statusLabel}>
             <i aria-hidden="true" />{statusLabel}
           </span>
           {onLanguage ? <button type="button" className="language-button" onClick={onLanguage} aria-label={t.switchLanguage}>{language === "en" ? "中" : "EN"}</button> : null}
@@ -130,11 +137,14 @@ export const QuotaOrb = memo(function QuotaOrb({
   const percent = short ?? weekly;
   const weeklyFallback = short === null && weekly !== null;
   const expired = isStaleExpired(snapshot);
+  const apiMode = snapshot.authMode === "api_key";
   const available = snapshot.status !== "signed_out" && snapshot.status !== "loading" && !expired && percent !== null;
   const tier = overallQuotaTier(snapshot);
   const circumference = 2 * Math.PI * 28;
   const dashOffset = available ? circumference * (1 - percent / 100) : circumference;
-  const label = available
+  const label = apiMode
+    ? tierLabel(snapshot, activeLanguage)
+    : available
     ? weeklyFallback ? `${t.weeklyRemaining} ${percent}%` : t.availableLabel(percent)
     : tierLabel(snapshot, activeLanguage);
 
@@ -151,7 +161,9 @@ export const QuotaOrb = memo(function QuotaOrb({
         <circle className="orb-ring__track" cx="34" cy="34" r="28" />
         {available ? <circle className="orb-ring__value" cx="34" cy="34" r="28" strokeDasharray={circumference} strokeDashoffset={dashOffset} /> : null}
       </svg>
-      {available ? (
+      {apiMode ? (
+        <section className="orb-api" aria-hidden="true"><Key /><span>API</span></section>
+      ) : available ? (
         <section className="orb-metric" aria-hidden="true">
           {weeklyFallback ? <small className="orb-window-label">W</small> : null}
           <span>{percent}</span><small>%</small>
@@ -159,7 +171,7 @@ export const QuotaOrb = memo(function QuotaOrb({
       ) : (
         <section className="orb-unavailable" aria-hidden="true"><OrbStateIcon snapshot={snapshot} /></section>
       )}
-      <span className={`orb-status orb-status--${snapshot.status} orb-status--${tier}`} aria-hidden="true" />
+      <span className={`orb-status orb-status--${snapshot.status} orb-status--${tier}${apiMode ? " orb-status--api" : ""}`} aria-hidden="true" />
     </main>
   );
 });

@@ -3,6 +3,7 @@ import {
   ClockCountdown,
   ClockCounterClockwise,
   CloudSlash,
+  Key,
   SignIn,
   SpinnerGap,
   WarningCircle,
@@ -87,6 +88,107 @@ function MetricTile({
   );
 }
 
+function formatApiCount(value: number | null | undefined, language: Language): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
+  return new Intl.NumberFormat(language === "en" ? "en-US" : "zh-CN", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+function formatApiCost(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
+  const maximumFractionDigits = value > 0 && value < 0.01 ? 4 : 2;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits,
+  }).format(value);
+}
+
+function ApiUsageMetrics({
+  snapshot,
+  language,
+  refreshing,
+  compact,
+  onRefresh,
+}: Required<Pick<QuotaMetricsProps, "snapshot" | "language" | "refreshing" | "compact">> & Pick<QuotaMetricsProps, "onRefresh">) {
+  const t = copy[language];
+  const usage = snapshot.apiUsage ?? null;
+  const expired = isStaleExpired(snapshot);
+  const periods = usage ? [usage.today, usage.monthToDate] : [];
+  const hasValues = periods.some((period) => [
+    period.inputTokens,
+    period.cachedInputTokens,
+    period.outputTokens,
+    period.requests,
+    period.costUsd,
+  ].some((value) => typeof value === "number" && Number.isFinite(value)));
+
+  if (!usage || usage.status === "not_configured") {
+    return (
+      <section className={`api-mode-card${compact ? " api-mode-card--compact" : ""}`} aria-live="polite">
+        <div className="api-mode-card__heading">
+          <span aria-hidden="true"><Key /></span>
+          <div><strong>{t.apiAccountTitle}</strong><small>{t.apiOrganizationScope}</small></div>
+        </div>
+        <p>{t.apiQuotaNotApplicable}</p>
+        <p className="api-mode-card__admin">{t.apiAdminHint}</p>
+        <small className="api-mode-card__local">{t.apiLocalStatsAvailable}</small>
+      </section>
+    );
+  }
+
+  if (expired || (usage.status === "unavailable" && !hasValues)) {
+    return (
+      <section className="quota-empty quota-empty--unavailable" aria-live="polite" aria-busy={refreshing}>
+        <div className="quota-empty__icon" aria-hidden="true"><Key /></div>
+        <strong>{t.apiUsageUnavailable}</strong>
+        <p>{t.apiUsageUnavailableHint}</p>
+        {onRefresh ? (
+          <button type="button" className="secondary-button" onClick={onRefresh} disabled={refreshing}>
+            {refreshing ? <SpinnerGap className="is-spinning" /> : <ArrowClockwise />}
+            <span>{refreshing ? t.refreshing : t.refresh}</span>
+          </button>
+        ) : null}
+      </section>
+    );
+  }
+
+  const month = usage.monthToDate;
+  return (
+    <section className={`api-usage-metrics${compact ? " api-usage-metrics--compact" : ""}`} aria-live="polite" aria-busy={refreshing}>
+      {snapshot.status === "stale" || usage.status === "stale" || usage.status === "partial" ? (
+        <div className={`data-banner${snapshot.status === "stale" || usage.status === "stale" ? " data-banner--stale" : ""}`} role="status">
+          <ClockCounterClockwise aria-hidden="true" />
+          <span>{snapshot.status === "stale" || usage.status === "stale" ? t.dataStale : t.apiPartialData}</span>
+          <small>{t.lastUpdated(formatUpdatedTime(usage.updatedAt, new Date(), language))}</small>
+        </div>
+      ) : null}
+      <div className="api-usage-heading">
+        <span aria-hidden="true"><Key /></span>
+        <div><strong>{t.apiAccountTitle}</strong><small>{t.apiOrganizationScope}</small></div>
+      </div>
+      <div className="api-metric-grid">
+        <article><span>{t.apiMonthCost}</span><strong>{formatApiCost(month.costUsd)}</strong></article>
+        <article><span>{t.apiTodayCost}</span><strong>{formatApiCost(usage.today.costUsd)}</strong></article>
+        <article>
+          <span>{t.apiMonthInput}</span>
+          <strong>{formatApiCount(month.inputTokens, language)}</strong>
+          <small>{t.apiCachedTokens(formatApiCount(month.cachedInputTokens, language))}</small>
+        </article>
+        <article>
+          <span>{t.apiMonthOutput}</span>
+          <strong>{formatApiCount(month.outputTokens, language)}</strong>
+          <small>{t.apiRequests(formatApiCount(month.requests, language))}</small>
+        </article>
+      </div>
+      <p className="api-usage-boundary">{t.apiCostNotBalance}</p>
+    </section>
+  );
+}
+
 export const QuotaMetrics = memo(function QuotaMetrics({
   snapshot,
   language,
@@ -130,6 +232,18 @@ export const QuotaMetrics = memo(function QuotaMetrics({
       ? t.noCreditExpiration
       : null;
   const creditUrgency = earliestCredit?.state.urgency ?? "unknown";
+
+  if (snapshot.authMode === "api_key") {
+    return (
+      <ApiUsageMetrics
+        snapshot={snapshot}
+        language={activeLanguage}
+        refreshing={refreshing}
+        compact={compact}
+        onRefresh={onRefresh}
+      />
+    );
+  }
 
   if (!canShowValues) {
     const isLoading = snapshot.status === "loading";
